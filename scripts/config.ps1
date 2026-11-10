@@ -42,7 +42,8 @@ $script:SSH_BASE = @("-i", $KEY_PATH, "-o", "BatchMode=yes", "-o", "StrictHostKe
 function Invoke-Remote {
     param(
         [Parameter(Mandatory = $true)][string]$ScriptBody,
-        [string[]]$ScriptArgs = @()
+        [string[]]$ScriptArgs = @(),
+        [hashtable]$EnvVars = @{}
     )
     $tmpLocal = Join-Path ([IO.Path]::GetTempPath()) "proyecto-final-remote.sh"
     $lfOnly = $ScriptBody -replace "`r`n", "`n"
@@ -52,7 +53,12 @@ function Invoke-Remote {
     if ($LASTEXITCODE -ne 0) { throw "fallo scp del script remoto" }
 
     $quoted = ($ScriptArgs | ForEach-Object { "'$_'" }) -join " "
-    & ssh @script:SSH_BASE "${EC2_USER}@${EC2_HOST}" "bash /tmp/proyecto-final-remote.sh $quoted"
+    $cmd = "bash /tmp/proyecto-final-remote.sh $quoted"
+    if ($EnvVars.Count -gt 0) {
+        $envPart = ($EnvVars.Keys | ForEach-Object { "$($_)=$($EnvVars[$_])" }) -join " "
+        $cmd = "env $envPart $cmd"
+    }
+    & ssh @script:SSH_BASE "${EC2_USER}@${EC2_HOST}" $cmd
     if ($LASTEXITCODE -ne 0) { throw "el script remoto fallo (exit code $LASTEXITCODE)" }
 }
 

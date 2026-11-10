@@ -36,6 +36,11 @@ RESPONSE=$(curl -fsS -m 15 "http://${EC2_HOST}:8080/topic-test?msj=${MSJ}") || {
 }
 echo "   respuesta de la api: $RESPONSE"
 
+PART=$(echo "$RESPONSE" | grep -oE '"particion":[0-9]+' | cut -d: -f2 | tr -d ' "')
+OFF=$(echo "$RESPONSE" | grep -oE '"offset":[0-9]+' | cut -d: -f2 | tr -d ' "')
+KEY="${PART}-${OFF}"
+PK_KEY="pagos-${PART}-${OFF}"
+
 # ------------------------------------------------------------------ 2. esperar proceso
 echo "-- 2. Esperando 6s a que los 3 grupos procesen el mensaje --"
 sleep 6
@@ -44,9 +49,10 @@ sleep 6
 echo "-- 3. Verificando recepcion en los consumers (via ssh) --"
 SSH_BASE=(ssh -i "$KEY_PATH" -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${EC2_USER}@${EC2_HOST}")
 
-"${SSH_BASE[@]}" bash -s -- "$REMOTE_DIR" "$MSJ" <<'REMOTE'
+"${SSH_BASE[@]}" bash -s -- "$REMOTE_DIR" "$MSJ" "$PART" "$OFF" <<'REMOTE'
 set -uo pipefail
-REMOTE_DIR="$1"; MSJ="$2"
+REMOTE_DIR="$1"; MSJ="$2"; PART="$3"; OFF="$4"
+AWS_REGION="${AWS_REGION:-us-east-2}"
 cd "$HOME/$REMOTE_DIR"
 
 FAILS=0
@@ -61,7 +67,7 @@ done
 
 if [ "$FAILS" -gt 0 ]; then
   echo ""
-  echo "   $FAILS consumer(s) sin el mensaje. Ver estado con:"
+  echo "   $FAILS verificacion(es) fallaron. Ver estado con:"
   echo "     sudo docker compose ps"
   echo "     sudo docker compose logs consumer-analiticas consumer-notificaciones consumer-pagos"
   exit 1
@@ -71,6 +77,24 @@ RC=$?
 
 if [ $RC -ne 0 ]; then
   echo "== Prueba FALLIDA =="
+  exit 1
+fi
+
+# ------------------------------------------------------------------ 4. DynamoDB (desde local)
+echo "-- 4. Verificando item persistido en DynamoDB (tabla por consumer) --"
+export AWS_PAGER=""
+DB_FAILS=0
+for table in analiticas notificaciones pagos; do
+  if aws dynamodb get-item --region "${AWS_REGION:-us-east-2}" --table-name "$table" \
+       --key "{\"PK\":{\"S\":\"${PK_KEY}\"}}" --query 'Item.PK.S' --output text 2>/dev/null | grep -qF "$PK_KEY"; then
+    echo "   OK    DynamoDB tabla=$table tiene item pk=${PK_KEY}"
+  else
+    echo "   FALLO DynamoDB tabla=$table NO tiene el item pk=${PK_KEY}"
+    DB_FAILS=$((DB_FAILS+1))
+  fi
+done
+if [ "$DB_FAILS" -gt 0 ]; then
+  echo "== Prueba FALLIDA (DynamoDB) =="
   exit 1
 fi
 

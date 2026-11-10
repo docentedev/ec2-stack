@@ -35,6 +35,37 @@ fi
 # ssh rechaza llaves demasiado abiertas
 chmod 600 "$KEY_PATH" 2>/dev/null || true
 
+AWS_REGION="${AWS_REGION:-us-east-2}"
+
+AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-$(aws configure get aws_access_key_id 2>/dev/null || echo "")}"
+AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-$(aws configure get aws_secret_access_key 2>/dev/null || echo "")}"
+AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN:-$(aws configure get aws_session_token 2>/dev/null || echo "")}"
+
+echo "== Preparando IAM para DynamoDB (best-effort; si falla se usan credenciales via env) =="
+# Todo este bloque es opcional: en cuentas restringidas (Learner Lab) iam:CreateRole
+# esta denegado y los consumers usan AWS_ACCESS_KEY_ID/SECRET/SESSION_TOKEN exportados.
+DYNAMO_ROLE="EC2-DynamoDB-Role"
+{
+  if ! aws iam get-role --role-name "$DYNAMO_ROLE" >/dev/null 2>&1; then
+    aws iam create-role --role-name "$DYNAMO_ROLE" \
+      --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}' >/dev/null
+    aws iam attach-role-policy --role-name "$DYNAMO_ROLE" \
+      --policy-arn "arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess"
+  fi
+  aws iam get-instance-profile --instance-profile-name "$DYNAMO_ROLE" >/dev/null 2>&1 || {
+    aws iam create-instance-profile --instance-profile-name "$DYNAMO_ROLE" >/dev/null
+    aws iam add-role-to-instance-profile --instance-profile-name "$DYNAMO_ROLE" --role-name "$DYNAMO_ROLE"
+  }
+  INSTANCE_ID=$(aws ec2 describe-instances --region "$AWS_REGION" \
+    --filters "Name=instance-state-name,Values=running" "Name=dns-name,Values=${EC2_HOST}" \
+    --query 'Reservations[].Instances[0].InstanceId' --output text | tr -d '[:space:]')
+  aws ec2 associate-iam-instance-profile --region "$AWS_REGION" --instance-id "$INSTANCE_ID" \
+    --iam-instance-profile "Name=${DYNAMO_ROLE}" >/dev/null
+  echo "   Instance profile ${DYNAMO_ROLE} asociado a ${INSTANCE_ID}."
+} || echo "   (IAM no disponible en esta cuenta: se usan credenciales via env)"
+echo "== IAM DynamoDB listo =="
+
+
 SSH_BASE=(ssh -i "$KEY_PATH" -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${EC2_USER}@${EC2_HOST}")
 
 echo "== Despliegue del stack en ${EC2_USER}@${EC2_HOST} =="
@@ -128,6 +159,15 @@ if [ "${total_mb:-0}" -lt 2000 ] && [ "${swap_mb:-0}" -lt 1000 ] && [ ! -f /swap
   sudo swapon /swapfile
   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
 fi
+
+# AWS CLI v2 (para create-tables.sh, topic-test.sh y el paso de IAM)
+if ! command -v aws >/dev/null 2>&1; then
+  echo "   AWS CLI no esta instalado: instalando..."
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m)-2.15.63.zip" -o /tmp/awscliv2.zip
+  unzip -o -q /tmp/awscliv2.zip -d /tmp/aws
+  sudo /tmp/aws/aws/install
+  rm -rf /tmp/aws /tmp/awscliv2.zip
+fi
 REMOTE
 
 # ------------------------------------------------------------------ 4. rsync del proyecto
@@ -146,10 +186,10 @@ echo "   OK"
 # ------------------------------------------------------------------ 5. build + up
 echo "-- Levantando stack (docker compose up -d --build) --"
 echo "   (la primera build de la api descarta Gradle y demora varios minutos)"
-"${SSH_BASE[@]}" bash -s -- "$REMOTE_DIR" <<'REMOTE'
+"${SSH_BASE[@]}" env AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}" AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN:-}" bash -s -- "$REMOTE_DIR" <<'REMOTE'
 set -euo pipefail
 cd "$HOME/$1"
-sudo docker compose up -d --build
+sudo env AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" AWS_SESSION_TOKEN="$AWS_SESSION_TOKEN" docker compose up -d --build
 REMOTE
 
 # ------------------------------------------------------------------ 6. health checks

@@ -26,6 +26,32 @@ $ErrorActionPreference = "Stop"
 . "$PSScriptRoot\config.ps1"
 Assert-Config
 
+Write-Host "-- Preparando IAM para DynamoDB (best-effort; si falla se usan credenciales via env) --"
+# Bloque opcional: en Learner Lab iam:CreateRole esta denegado y los consumers usan
+# AWS_ACCESS_KEY_ID/SECRET/SESSION_TOKEN exportados.
+$DYNAMO_ROLE = "EC2-DynamoDB-Role"
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    & aws iam get-role --role-name $DYNAMO_ROLE 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        & aws iam create-role --role-name $DYNAMO_ROLE --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}' 2>$null | Out-Null
+        & aws iam attach-role-policy --role-name $DYNAMO_ROLE --policy-arn "arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess" 2>$null | Out-Null
+    }
+    & aws iam get-instance-profile --instance-profile-name $DYNAMO_ROLE 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        & aws iam create-instance-profile --instance-profile-name $DYNAMO_ROLE 2>$null | Out-Null
+        & aws iam add-role-to-instance-profile --instance-profile-name $DYNAMO_ROLE --role-name $DYNAMO_ROLE 2>$null | Out-Null
+    }
+    $instanceId = (@(& aws ec2 describe-instances --region $AWS_REGION `
+        --filters Name=instance-state-name,Values=running "Name=dns-name,Values=$EC2_HOST" `
+        --query 'Reservations[].Instances[0].InstanceId' --output text) | Select-Object -Last 1)
+    & aws ec2 associate-iam-instance-profile --region $AWS_REGION --instance-id $instanceId --iam-instance-profile Name=$DYNAMO_ROLE 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) { Write-Host "   Instance profile $DYNAMO_ROLE asociado a $instanceId." }
+    else { Write-Host "   (IAM no disponible en esta cuenta: se usan credenciales via env)" }
+} finally { $ErrorActionPreference = $prevEap }
+Write-Host "== IAM DynamoDB listo =="
+
 Write-Host "== Despliegue del stack en ${EC2_USER}@${EC2_HOST} =="
 
 # ------------------------------------------------------------------ 1. limpieza
@@ -116,6 +142,15 @@ if [ "${total_mb:-0}" -lt 2000 ] && [ "${swap_mb:-0}" -lt 1000 ] && [ ! -f /swap
   sudo swapon /swapfile
   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
 fi
+
+# AWS CLI v2 (para create-tables.sh, topic-test.sh y el paso de IAM)
+if ! command -v aws >/dev/null 2>&1; then
+  echo "   AWS CLI no esta instalado: instalando..."
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m)-2.15.63.zip" -o /tmp/awscliv2.zip
+  unzip -o -q /tmp/awscliv2.zip -d /tmp/aws
+  sudo /tmp/aws/aws/install
+  rm -rf /tmp/aws /tmp/awscliv2.zip
+fi
 '@
 
 Write-Host "-- Verificando Docker en el EC2 --"
@@ -166,9 +201,16 @@ $composeUp = @'
 set -euo pipefail
 REMOTE_DIR="$1"
 cd "$HOME/$REMOTE_DIR"
-sudo docker compose up -d --build
+sudo env AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" AWS_SESSION_TOKEN="$AWS_SESSION_TOKEN" docker compose up -d --build
 '@
-Invoke-Remote -ScriptBody $composeUp -ScriptArgs @($REMOTE_DIR)
+$awsAccessKeyId = (& aws configure get aws_access_key_id) -replace "`r`n", ""
+$awsSecretAccessKey = (& aws configure get aws_secret_access_key) -replace "`r`n", ""
+$awsSessionToken = (& aws configure get aws_session_token) -replace "`r`n", ""
+Invoke-Remote -ScriptBody $composeUp -ScriptArgs @($REMOTE_DIR) -Env @{
+    AWS_ACCESS_KEY_ID = $awsAccessKeyId
+    AWS_SECRET_ACCESS_KEY = $awsSecretAccessKey
+    AWS_SESSION_TOKEN = $awsSessionToken
+}
 
 # ------------------------------------------------------------------ 6. health checks
 # Mismo payload bash que deploy.sh (se ejecuta EN el EC2)

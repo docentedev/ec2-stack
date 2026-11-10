@@ -6,10 +6,10 @@ Sistema basado en microservicios desplegado en **una única instancia EC2 de AWS
 
 | Servicio                 | Puerto | Tecnología                        | Estado actual                  |
 | ------------------------ | ------ | --------------------------------- | ------------------------------ |
-| api                      | 8080   | Java 21 + Spring Boot 4 (Gradle)  | Solo `GET /health`             |
-| consumer-analiticas      | 8081   | Node.js 22 + Express              | Solo `GET /health`             |
-| consumer-notificaciones  | 8082   | Node.js 22 + Express              | Solo `GET /health`             |
-| consumer-pagos           | 8083   | Node.js 22 + Express              | Solo `GET /health`             |
+| api                      | 8080   | Java 21 + Spring Boot 4 (Gradle)  | Producer Kafka (`GET /topic-test`) + `GET /health` |
+| consumer-analiticas      | 8081   | Node.js 22 + Express + DynamoDB | Consumer Kafka + DynamoDB + `GET /health` |
+| consumer-notificaciones  | 8082   | Node.js 22 + Express + DynamoDB | Consumer Kafka + DynamoDB + `GET /health` |
+| consumer-pagos           | 8083   | Node.js 22 + Express + DynamoDB | Consumer Kafka + DynamoDB + `GET /health` |
 | kafka                    | 9092   | Apache Kafka 3.9 (KRaft)          | Broker de mensajería (interno) |
 | kafka-ui                 | 8084   | Kafka UI                          | UI de administración           |
 
@@ -26,12 +26,16 @@ proyectoFinal/
 ├── scripts/
 │   ├── config.sh             # EDITAR: IP/DNS del EC2, usuario, región, SG
 │   ├── cleanup.sh            # detiene y respalda el stack viejo sin docker
-│   ├── deploy.sh             # despliegue completo (limpia + rsync + build + health)
+│   ├── deploy.sh             # despliegue completo (limpia + rsync + build + health + IAM DynamoDB)
 │   ├── verify.sh             # health checks contra la IP pública del EC2
 │   ├── security-group.sh     # abre puertos en el SG (SSH a tu IP + 8080-8084)
+│   ├── create-tables.sh      # crea las tablas DynamoDB (pagos/notificaciones/analiticas)
+│   ├── topic-test.sh         # prueba end-to-end del flujo: /topic-test -> consumers -> DynamoDB
 │   ├── config.ps1            # versión Windows: config común + helper remoto
 │   ├── cleanup.ps1           # versión Windows de cleanup.sh
 │   ├── deploy.ps1            # versión Windows de deploy.sh (tar+scp en vez de rsync)
+│   ├── create-tables.ps1    # versión Windows de create-tables.sh
+│   ├── topic-test.ps1       # versión Windows de topic-test.sh
 │   ├── verify.ps1            # versión Windows de verify.sh
 │   └── security-group.ps1    # versión Windows de security-group.sh
 └── services/
@@ -177,12 +181,19 @@ Equivalentes 1:1 en `.ps1` (probados contra el EC2 real):
 
 ## Checklist fase 2 — mensajería Kafka
 
-- [ ] 1. Agregar dependencia Kafka a la api (`spring-kafka`) y a los 3 consumers (`kafkajs`).
-- [ ] 2. Implementar endpoint `GET /topic-test?msj=test` (productor) en la api.
-- [ ] 3. Implementar suscripción al tópico `pagos` en los consumers con sus grupos propios.
-- [ ] 4. Verificar build local de las 4 imágenes (Docker).
-- [ ] 5. Redesplegar con los scripts (`deploy.sh` / `deploy.ps1`) y verificar health checks.
+- [x] 1. Agregar dependencia Kafka a la api (`spring-kafka`) y a los 3 consumers (`kafkajs`).
+- [x] 2. Implementar endpoint `GET /topic-test?msj=test` (productor) en la api.
+- [x] 3. Implementar suscripción al tópico `pagos` en los consumers con sus grupos propios.
+- [x] 4. Verificar build local de las 4 imágenes (Docker).
+- [x] 5. Redesplegar con los scripts (`deploy.sh` / `deploy.ps1`) y verificar health checks.
 - [x] 6. Probar flujo completo: `/topic-test?msj=test` → confirmar recepción en los 3 consumers (logs) y en kafka-ui.
+
+## Checklist fase 3 — persistencia DynamoDB
+
+- [x] 1. Crear las 3 tablas con `./scripts/create-tables.sh` (PK única por mensaje, billing PAY_PER_REQUEST).
+- [ ] 2. Conectar los consumers a DynamoDB con `@aws-sdk/client-dynamodb` (PutItem idempotente con `attribute_not_exists PK`).
+- [ ] 3. Asignar policy DynamoDB al IAM role de la EC2 (automático vía `deploy.sh`).
+- [ ] 4. Redesplegar con los scripts y probar el flujo completo (`topic-test.sh`) → item persistido en DynamoDB.
 
 ## Resultado fase 2 — Kafka implementado y probado (10-nov-2026) ✅
 
@@ -201,6 +212,67 @@ Equivalentes 1:1 en `.ps1` (probados contra el EC2 real):
 ### Flujo final
 
 `api --(KafkaTemplate)--> topico "pagos" --> 3 consumers (grupos analiticas/notificaciones/pagos) --> log en consola`.
+
+## Fase 3 — Persistencia en DynamoDB (implementada 10-nov-2026) ✅
+
+### Objetivo
+
+A cada mensaje recibido por los consumers, guardarlo de forma **idempotente** en su tabla DynamoDB correspondiente.
+
+### Flujo
+
+```
+api  →  topic "pagos"
+      ↓
+3 consumers (grupos: analiticas / notificaciones / pagos)
+      ↓ PutItem con ConditionExpression (idempotente: attribute_not_exists PK)
+3 tablas DynamoDB:
+      pagos
+      notificaciones
+      analiticas
+```
+
+### Tablas (una por consumer group = nombre de la tabla)
+
+| Tabla             | PK (HASH) del item                  | Contenido del item                        | Consumer que la escribe |
+| ----------------- | ---------------------------------- | ----------------------------------------- | ----------------------- |
+| `pagos`           | `pagos-<partition>-<offset>`      | mensaje / origen / fecha                  | consumer-pagos (`group=pagos`) |
+| `notificaciones` | `notificaciones-<partition>-<offset>` | mensaje / origen / fecha              | consumer-notificaciones (`group=notificaciones`) |
+| `analiticas`      | `analiticas-<partition>-<offset>`  | mensaje / origen / fecha                  | consumer-analiticas (`group=analiticas`) |
+
+- **KeySchema**: `PK` (HASH) solo, tipo `S`.
+- **Billing**: `PAY_PER_REQUEST` (lo más económico; la cuenta tiene 1 año de créditos gratis).
+- **Atributos del item**: `PK` (clave compuesta del mensaje: `<tabla>-<partition>-<offset>`), `mensaje` (String), `origen` (`"api"`), `fecha` (ISO-8601).
+
+### Idempotencia
+
+- El consumer hace `PutItem` con `ConditionExpression: "attribute_not_exists PK"`.
+- Si el mensaje (mismo topico+partición+offset) ya fue guardado, la condición falla → `ConditionalCheckFailedException` → se ignora (insert-only, no overwrite).
+- Garantiza que cada mensaje se procese/guarda una sola vez, incluso si el consumer se reinicia y relee desde su offset.
+
+### IAM
+
+- `deploy.sh` / `deploy.ps1` asignan automáticamente la policy `AmazonDynamoDBFullAccess` al IAM role del instance profile de la EC2 (para que los containers con credenciales de la instancia puedan escribir en DynamoDB).
+
+### Scripts
+
+- `./scripts/create-tables.sh` (bash) / `.\scripts\create-tables.ps1` (Windows): crean las 3 tablas si no existen (idempotente) con AWS CLI.
+- `./scripts/topic-test.sh` (bash) / `.\scripts\topic-test.ps1` (Windows): publica vía `/topic-test`, espera, verifica en logs de los consumers y hace `aws dynamodb get-item` contra la tabla correspondiente.
+- Comandos manuales equivalentes:
+  ```bash
+  aws dynamodb create-table --region us-east-2 \
+    --table-name pagos \
+    --attribute-definitions AttributeName=PK,AttributeType=S \
+    --key-schema AttributeName=PK,KeyType=HASH \
+    --billing-mode PAY_PER_REQUEST
+  # (mismo comando para notificaciones y analiticas, cambiando el nombre)
+  ```
+
+### Verificación fase 3 (pendiente de correr)
+
+- [ ] 1. Ejecutar `./scripts/create-tables.sh` → tablas `pagos`, `notificaciones`, `analiticas` creadas (PAY_PER_REQUEST).
+- [ ] 2. Ejecutar `./scripts/deploy.sh` (o `deploy.ps1`) → consumers con `@aws-sdk/client-dynamodb` + IAM attach.
+- [ ] 3. Ejecutar `./scripts/topic-test.sh <msj>` → mensaje publicado → consumers guardan en DynamoDB → verificación con `aws dynamodb get-item` OK.
 
 ## Resultado del despliegue (10-nov-2026) ✅
 

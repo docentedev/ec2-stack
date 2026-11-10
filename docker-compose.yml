@@ -39,6 +39,13 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_GROUP_ID: analiticas
       KAFKA_TOPIC: pagos
+      AWS_REGION: us-east-2
+      AWS_DEFAULT_REGION: us-east-2
+      # Credenciales AWS para DynamoDB (PutItem). En EC2 se exportan desde el host
+      # en el paso de compose del deploy.sh; en local el default chain se usa.
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
 
   consumer-notificaciones:
     build:
@@ -56,6 +63,11 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_GROUP_ID: notificaciones
       KAFKA_TOPIC: pagos
+      AWS_REGION: us-east-2
+      AWS_DEFAULT_REGION: us-east-2
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
 
   consumer-pagos:
     build:
@@ -73,6 +85,11 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_GROUP_ID: pagos
       KAFKA_TOPIC: pagos
+      AWS_REGION: us-east-2
+      AWS_DEFAULT_REGION: us-east-2
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
 
   # ---------------------------------------------------- kafka (KRaft, sin Zookeeper)
   kafka:

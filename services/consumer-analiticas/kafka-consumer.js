@@ -5,8 +5,12 @@
 //   KAFKA_TOPIC             (default pagos)
 // Al recibir un mensaje lo loguea en consola (ver README: mensajería kafka).
 const { Kafka } = require("kafkajs");
+const { DynamoDBClient, PutItemCommand } = require("@aws-sdk/client-dynamodb");
 
 const SERVICE_NAME = process.env.SERVICE_NAME || "consumer-analiticas";
+const dynamoDBClient = new DynamoDBClient({
+  region: process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "us-east-2",
+});
 const KAFKA_BOOTSTRAP_SERVERS = process.env.KAFKA_BOOTSTRAP_SERVERS || "kafka:9092";
 const KAFKA_GROUP_ID = process.env.KAFKA_GROUP_ID || "analiticas";
 const KAFKA_TOPIC = process.env.KAFKA_TOPIC || "pagos";
@@ -34,6 +38,29 @@ async function connectWithRetry() {
               `partition=${partition} offset=${message.offset} ` +
               `mensaje=${message.value.toString()}`
           );
+
+          // ---- Persistencia en DynamoDB (idempotente: PK unica = topico-particion-offset)
+          const pk = `${topic}-${partition}-${message.offset}`;
+          const params = {
+            TableName: KAFKA_GROUP_ID, // tabla con el nombre del grupo (pagos/notificaciones/analiticas)
+            Item: {
+              PK: { S: pk },
+              mensaje: { S: message.value.toString() },
+              origen: { S: "api" },
+              fecha: { S: new Date().toISOString() },
+            },
+            ConditionExpression: "attribute_not_exists(PK)",
+          };
+          try {
+            await dynamoDBClient.send(new PutItemCommand(params));
+            log(`guardado en dynamodb: tabla=${KAFKA_GROUP_ID} pk=${pk}`);
+          } catch (err) {
+            if (err.name === "ConditionalCheckFailedException") {
+              log(`duplicado ignorado (idempotente): pk=${pk}`);
+            } else {
+              log(`error al guardar en dynamodb: ${err.message || err}`);
+            }
+          }
         },
       });
 
