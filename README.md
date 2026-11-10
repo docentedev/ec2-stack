@@ -28,7 +28,12 @@ proyectoFinal/
 │   ├── cleanup.sh            # detiene y respalda el stack viejo sin docker
 │   ├── deploy.sh             # despliegue completo (limpia + rsync + build + health)
 │   ├── verify.sh             # health checks contra la IP pública del EC2
-│   └── security-group.sh     # abre puertos en el SG (SSH a tu IP + 8080-8084)
+│   ├── security-group.sh     # abre puertos en el SG (SSH a tu IP + 8080-8084)
+│   ├── config.ps1            # versión Windows: config común + helper remoto
+│   ├── cleanup.ps1           # versión Windows de cleanup.sh
+│   ├── deploy.ps1            # versión Windows de deploy.sh (tar+scp en vez de rsync)
+│   ├── verify.ps1            # versión Windows de verify.sh
+│   └── security-group.ps1    # versión Windows de security-group.sh
 └── services/
     ├── api/                  # Spring Boot (Dockerfile multi-stage)
     ├── consumer-analiticas/  # Node + Express (server.js + Dockerfile)
@@ -68,6 +73,8 @@ Si se quisiera reducir aún más (no necesario por ahora):
 
 ## Despliegue
 
+### macOS / Linux (bash)
+
 1. Editar `scripts/config.sh`: `EC2_HOST` (IP o DNS público del EC2) y revisar usuario/llave/región.
 2. Ejecutar en orden:
    ```bash
@@ -78,7 +85,27 @@ Si se quisiera reducir aún más (no necesario por ahora):
 - `deploy.sh` usa `rsync` + `docker compose up -d --build` (build en el propio EC2, sin registry).
 - La primera build de la api demora varios minutos (descarga Gradle + dependencias Maven dentro del contenedor).
 - En instancias con poca RAM el deploy crea un swap de 2G para que el build de Gradle no muera por OOM.
-- A futuro: versión Windows del deploy (`deploy.ps1`).
+
+### Windows (PowerShell)
+
+Equivalentes 1:1 en `.ps1` (probados contra el EC2 real):
+
+```powershell
+.\scripts\security-group.ps1    # abre 22 (a tu IP) y 8080-8084 (requiere AWS CLI v2)
+.\scripts\deploy.ps1             # limpia stack viejo + despliega el nuevo
+.\scripts\verify.ps1              # verifica desde afuera, contra la IP pública
+```
+
+- También existe `.\scripts\cleanup.ps1` (equivale a `cleanup.sh`) y `.\scripts\config.ps1` (equivale a `config.sh`).
+- `deploy.ps1` acepta `-SkipCleanup` para omitir la limpieza (re-deploy rápido).
+- En vez de `rsync` (no existe en Windows) empaqueta el proyecto con `tar` (incluido en Windows 10 1803+) y lo sube con `scp`.
+- Requisitos Windows 10/11: **Cliente OpenSSH** (Configuración > Aplicaciones > Características opcionales) y **AWS CLI v2** para `security-group.ps1`. `verify.ps1` usa `curl.exe` (incluido) con fallback nativo a `Invoke-WebRequest`.
+- Compatibles con Windows PowerShell 5.1 y pwsh 7+.
+- Si ssh rechaza la llave (`UNPROTECTED PRIVATE KEY`), restringir su ACL:
+  ```powershell
+  icacls .\mi-llave-privada.pem /inheritance:r /grant "${env:USERNAME}:F"
+  ```
+- Detalle técnico: los scripts PowerShell suben los payloads bash al EC2 como UTF-8 sin BOM con finales de línea LF (evita el clásico error `$'\r': command not found` de pipear texto por ssh desde Windows).
 
 ## Reglas del proyecto
 
@@ -91,7 +118,7 @@ Si se quisiera reducir aún más (no necesario por ahora):
 > Marcar cada paso al completarlo.
 
 - [x] 1. Generar `Dockerfile` por servicio y `docker-compose.yml` (stack: api, 3 consumers, kafka KRaft, kafka-ui).
-- [x] 2. Generar scripts en `./scripts` (config, cleanup, deploy, verify, security-group).
+- [x] 2. Generar scripts en `./scripts` (config, cleanup, deploy, verify, security-group) en bash y PowerShell (.ps1).
 - [x] 3. Verificación local del stack: build de las 4 imágenes + health checks OK (api, consumers, kafka-ui).
 - [x] 4. Definir `EC2_HOST` en `scripts/config.sh`.
 - [x] 5. Abrir puertos en el Security Group (`./scripts/security-group.sh`).
@@ -120,6 +147,7 @@ Historial de la migración:
 3. Swap de 2G creado para el build de Gradle en el t3.micro (1GB RAM).
 4. Stack levantado con `docker compose up -d --build` y health checks OK (internos y desde afuera).
 5. Security Group `sg-0dac330c25b8c2240`: 22 solo a la IP de origen + 8080-8084 públicos; kafka 9092 interno.
+6. Versiones Windows (`.ps1`) probadas contra el mismo EC2: `verify.ps1` OK contra los 5 endpoints y `deploy.ps1 -SkipCleanup` completó el ciclo completo (ssh + tar/scp + compose + health checks OK).
 
 ## Notas de verificación local (10-nov-2026)
 
