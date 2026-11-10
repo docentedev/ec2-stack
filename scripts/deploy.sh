@@ -88,24 +88,30 @@ if ! sudo docker compose version >/dev/null 2>&1; then
   echo "ERROR: el plugin docker compose no está disponible en el EC2" >&2
   exit 1
 fi
-if ! sudo docker buildx version >/dev/null 2>&1; then
-  # docker compose build requiere buildx >= 0.17; el docker de Amazon Linux no lo trae
-  echo "   Plugin docker buildx no encontrado: descargando de GitHub..."
+# compose v5 exige buildx >= 0.17.0 (el docker de Amazon Linux trae 0.12.1 viejo)
+buildx_version_ok() {
+  v=$(sudo docker buildx version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  [ -n "$v" ] && [ "$(printf '%s\n' "0.17.0" "$v" | sort -V | head -1)" = "0.17.0" ]
+}
+if ! buildx_version_ok; then
+  echo "   buildx ausente o viejo (<0.17.0): descargando versión reciente de GitHub..."
   case "$(uname -m)" in
-    x86_64) buildx_arch=x86_64 ;;
-    aarch64|arm64) buildx_arch=aarch64 ;;
+    x86_64) buildx_arch=amd64 ;;   # los assets de buildx usan amd64/arm64, no x86_64/aarch64
+    aarch64|arm64) buildx_arch=arm64 ;;
     *) echo "ERROR: arquitectura no soportada para buildx: $(uname -m)" >&2; exit 1 ;;
   esac
   buildx_version=$(curl -fsSL https://api.github.com/repos/docker/buildx/releases/latest \
     | grep -oE '"tag_name": *"v[0-9.]+"' | head -1 | grep -oE 'v[0-9.]+')
-  if [ -z "$buildx_version" ]; then
-    echo "ERROR: no se pudo determinar la última versión de buildx" >&2
-    exit 1
-  fi
+  # fallback si la API de GitHub falla (rate limit): versión fijada que cumple >= 0.17.0
+  [ -z "$buildx_version" ] && buildx_version="v0.21.1"
   sudo mkdir -p /usr/local/lib/docker/cli-plugins
   sudo curl -fsSL "https://github.com/docker/buildx/releases/download/${buildx_version}/buildx-${buildx_version}.linux-${buildx_arch}" \
     -o /usr/local/lib/docker/cli-plugins/docker-buildx
   sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
+fi
+if ! buildx_version_ok; then
+  echo "ERROR: no se pudo obtener buildx >= 0.17.0" >&2
+  exit 1
 fi
 sudo docker buildx version
 sudo docker --version

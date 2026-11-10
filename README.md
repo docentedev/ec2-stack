@@ -93,12 +93,33 @@ Si se quisiera reducir aún más (no necesario por ahora):
 - [x] 1. Generar `Dockerfile` por servicio y `docker-compose.yml` (stack: api, 3 consumers, kafka KRaft, kafka-ui).
 - [x] 2. Generar scripts en `./scripts` (config, cleanup, deploy, verify, security-group).
 - [x] 3. Verificación local del stack: build de las 4 imágenes + health checks OK (api, consumers, kafka-ui).
-- [ ] 4. Definir `EC2_HOST` en `scripts/config.sh`.
-- [ ] 5. Abrir puertos en el Security Group (`./scripts/security-group.sh`).
-- [ ] 6. Detectar y detener el proceso Spring Boot que corre hoy sin Docker en el EC2 (`cleanup.sh` lo detecta por systemd y por puertos 8080-8083, y respalda los jars a `~/backup-pre-docker/`).
-- [ ] 7. Desplegar el stack completo (`./scripts/deploy.sh`: rsync + build + health checks).
-- [ ] 8. Verificar desde afuera contra la IP pública (`./scripts/verify.sh`).
-- [ ] 9. Documentar resultado del despliegue en este README (URLs finales).
+- [x] 4. Definir `EC2_HOST` en `scripts/config.sh`.
+- [x] 5. Abrir puertos en el Security Group (`./scripts/security-group.sh`).
+- [x] 6. Detectar y detener el proceso Spring Boot que corre hoy sin Docker en el EC2 (`cleanup.sh` lo detecta por systemd y por puertos 8080-8083, y respalda los jars a `~/backup-pre-docker/`).
+- [x] 7. Desplegar el stack completo (`./scripts/deploy.sh`: rsync + build + health checks).
+- [x] 8. Verificar desde afuera contra la IP pública (`./scripts/verify.sh`).
+- [x] 9. Documentar resultado del despliegue en este README (URLs finales).
+
+## Resultado del despliegue (10-nov-2026) ✅
+
+**Instancia:** `i-034c79128b1fa7373` (t3.micro, us-east-2, Amazon Linux 2023, `ec2-user`)
+DNS público: `ec2-77-113-69-25.us-east-2.compute.amazonaws.com`
+
+| Servicio              | URL verificada desde afuera                                        | Respuesta |
+| --------------------- | ------------------------------------------------------------------ | --------- |
+| api                   | http://ec2-77-113-69-25.us-east-2.compute.amazonaws.com:8080/health | `{"status":"OK"}` |
+| consumer-analiticas   | http://ec2-77-113-69-25.us-east-2.compute.amazonaws.com:8081/health | `{"message":"OK"}` |
+| consumer-notificaciones | http://ec2-77-113-69-25.us-east-2.compute.amazonaws.com:8082/health | `{"message":"OK"}` |
+| consumer-pagos        | http://ec2-77-113-69-25.us-east-2.compute.amazonaws.com:8083/health | `{"message":"OK"}` |
+| kafka-ui              | http://ec2-77-113-69-25.us-east-2.compute.amazonaws.com:8084        | HTTP 200 (UI) |
+
+Historial de la migración:
+
+1. `cleanup.sh`: detectó y mató el jar viejo (`cursos-0.0.1-SNAPSHOT.jar`, pid en 8080), liberó 8080-8083 y respaldó 3 jars (incl. `/opt/cloud-usuarios-bff/app.jar`) en `~/backup-pre-docker/20261110-124258/`.
+2. Docker instalado desde repos de Amazon Linux (`docker 25.0.14`), plugin compose v5.7 y buildx v0.38.2 desde GitHub (Amazon Linux no los trae en la versión requerida).
+3. Swap de 2G creado para el build de Gradle en el t3.micro (1GB RAM).
+4. Stack levantado con `docker compose up -d --build` y health checks OK (internos y desde afuera).
+5. Security Group `sg-0dac330c25b8c2240`: 22 solo a la IP de origen + 8080-8084 públicos; kafka 9092 interno.
 
 ## Notas de verificación local (10-nov-2026)
 
