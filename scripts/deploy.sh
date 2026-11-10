@@ -59,14 +59,55 @@ echo "-- Verificando Docker en el EC2 --"
 "${SSH_BASE[@]}" bash -s <<'REMOTE'
 set -euo pipefail
 if ! command -v docker >/dev/null 2>&1; then
-  echo "   Docker no está instalado: instalando (get.docker.com)..."
-  curl -fsSL https://get.docker.com | sudo sh
+  if [ -f /etc/os-release ] && grep -q 'ID="amzn"' /etc/os-release; then
+    # Amazon Linux (2/2023): get.docker.com NO soporta "amzn"; usar repos de AWS
+    echo "   Docker no está instalado: instalando desde repos de Amazon Linux..."
+    if command -v dnf >/dev/null 2>&1; then PKG=dnf; else PKG=yum; fi
+    sudo "$PKG" install -y docker
+    sudo systemctl enable --now docker
+  else
+    echo "   Docker no está instalado: instalando (get.docker.com)..."
+    curl -fsSL https://get.docker.com | sudo sh
+    sudo systemctl enable --now docker || true
+  fi
   sudo usermod -aG docker "$USER" || true
+fi
+if ! sudo docker compose version >/dev/null 2>&1; then
+  echo "   Plugin docker compose no encontrado en repos: descargando de GitHub..."
+  case "$(uname -m)" in
+    x86_64) compose_arch=x86_64 ;;
+    aarch64|arm64) compose_arch=aarch64 ;;
+    *) echo "ERROR: arquitectura no soportada para compose: $(uname -m)" >&2; exit 1 ;;
+  esac
+  sudo mkdir -p /usr/local/lib/docker/cli-plugins
+  sudo curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${compose_arch}" \
+    -o /usr/local/lib/docker/cli-plugins/docker-compose
+  sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 fi
 if ! sudo docker compose version >/dev/null 2>&1; then
   echo "ERROR: el plugin docker compose no está disponible en el EC2" >&2
   exit 1
 fi
+if ! sudo docker buildx version >/dev/null 2>&1; then
+  # docker compose build requiere buildx >= 0.17; el docker de Amazon Linux no lo trae
+  echo "   Plugin docker buildx no encontrado: descargando de GitHub..."
+  case "$(uname -m)" in
+    x86_64) buildx_arch=x86_64 ;;
+    aarch64|arm64) buildx_arch=aarch64 ;;
+    *) echo "ERROR: arquitectura no soportada para buildx: $(uname -m)" >&2; exit 1 ;;
+  esac
+  buildx_version=$(curl -fsSL https://api.github.com/repos/docker/buildx/releases/latest \
+    | grep -oE '"tag_name": *"v[0-9.]+"' | head -1 | grep -oE 'v[0-9.]+')
+  if [ -z "$buildx_version" ]; then
+    echo "ERROR: no se pudo determinar la última versión de buildx" >&2
+    exit 1
+  fi
+  sudo mkdir -p /usr/local/lib/docker/cli-plugins
+  sudo curl -fsSL "https://github.com/docker/buildx/releases/download/${buildx_version}/buildx-${buildx_version}.linux-${buildx_arch}" \
+    -o /usr/local/lib/docker/cli-plugins/docker-buildx
+  sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
+fi
+sudo docker buildx version
 sudo docker --version
 sudo docker compose version
 

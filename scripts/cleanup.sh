@@ -110,7 +110,7 @@ while IFS= read -r jar; do
   echo "   moviendo: $jar"
   mv "$jar" "$BACKUP_DIR/" 2>/dev/null || sudo mv "$jar" "$BACKUP_DIR/" 2>/dev/null || echo "   (no se pudo mover: $jar)"
   MOVED=1
-done < <(find "$HOME" /opt /srv -maxdepth 3 -name "*.jar" -type f 2>/dev/null)
+done < <(find "$HOME" /opt /srv -maxdepth 3 -name "*.jar" -type f -not -path "*/backup-pre-docker/*" 2>/dev/null)
 [[ "$MOVED" -eq 0 ]] && echo "   (no se encontraron jars sueltos)"
 
 echo "-- Resumen --"
