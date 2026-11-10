@@ -1,0 +1,11 @@
+# Llaves privadas: NUNCA commitear ni subir al EC2
+*.pem
+
+# Dependencias y builds
+node_modules/
+.gradle/
+build/
+dist/
+
+# Sistema
+.DS_Store

@@ -1,0 +1,99 @@
+# Stack completo del proyecto final: 4 servicios + Kafka (KRaft) + Kafka UI.
+# Despliegue: ver scripts/deploy.sh y README.md
+#
+# Puertos públicos: 8080 (api), 8081-8083 (consumers), 8084 (kafka-ui)
+# Kafka 9092 queda interno a la red de docker (los servicios se conectan como kafka:9092)
+
+name: proyecto-final
+
+services:
+  # ---------------------------------------------------- api (Spring Boot, Java 21)
+  api:
+    build:
+      context: ./services/api
+    image: proyecto-final/api:latest
+    container_name: api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # El api aún no consume kafka; queda preparado para cuando se integre
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+
+  # ---------------------------------------------------- consumers (Node + Express)
+  consumer-analiticas:
+    build:
+      context: ./services/consumer-analiticas
+    image: proyecto-final/consumer-analiticas:latest
+    container_name: consumer-analiticas
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      SERVICE_NAME: consumer-analiticas
+      PORT: 8081
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+
+  consumer-notificaciones:
+    build:
+      context: ./services/consumer-notificaciones
+    image: proyecto-final/consumer-notificaciones:latest
+    container_name: consumer-notificaciones
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    environment:
+      SERVICE_NAME: consumer-notificaciones
+      PORT: 8082
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+
+  consumer-pagos:
+    build:
+      context: ./services/consumer-pagos
+    image: proyecto-final/consumer-pagos:latest
+    container_name: consumer-pagos
+    restart: unless-stopped
+    ports:
+      - "8083:8083"
+    environment:
+      SERVICE_NAME: consumer-pagos
+      PORT: 8083
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+
+  # ---------------------------------------------------- kafka (KRaft, sin Zookeeper)
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: kafka
+    restart: unless-stopped
+    ports:
+      # Solo accesible desde el propio EC2 (127.0.0.1) para debugging;
+      # NO se expone públicamente en el Security Group.
+      - "127.0.0.1:29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+  # ---------------------------------------------------- kafka-ui (puerto público 8084)
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    restart: unless-stopped
+    depends_on:
+      - kafka
+    ports:
+      - "8084:8080" # 8084 público porque 8080 ya lo usa api
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: "true"
