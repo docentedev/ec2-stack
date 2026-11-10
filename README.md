@@ -75,6 +75,88 @@ Si se quisiera reducir aún más (no necesario por ahora):
 - Hoy el EC2 tiene corriendo **sin Docker** un proyecto Java + Spring Boot desplegado directamente sobre el sistema operativo.
 - **Objetivo:** partir de cero — limpiar lo que corre hoy y desplegar el stack nuevo 100% dockerizado con `docker-compose`.
 
+## Conceptos clave de Kafka
+
+Kafka es un **log de eventos distribuido**: los productores *agregan* mensajes al final de un registro ordenado y los consumidores los *leen* a su ritmo, sin que el mensaje desaparezca al leerse. Esto desacopla a quien publica de quien consume.
+
+```mermaid
+flowchart LR
+    P["Producer<br/>(api Spring Boot)"] -->|"1. send(key?, value)"| B
+
+    subgraph B["Broker Kafka (KRaft)"]
+        subgraph T["Topic: pagos"]
+            direction TB
+            P0["Partición 0<br/>offset: 0 | 1 | 2 | 3 | 4 | 5 → (se agrega al final)"]
+            P1["Partición 1 … N<br/>(más particiones = más paralelismo)"]
+        end
+        CO[("__consumer_offsets<br/>último offset leído por cada grupo")]
+    end
+
+    subgraph G1["Consumer Group: pagos"]
+        C1["consumer-pagos"]
+    end
+    subgraph G2["Consumer Group: notificaciones"]
+        C2["consumer-notificaciones"]
+    end
+    subgraph G3["Consumer Group: analiticas"]
+        C3["consumer-analiticas"]
+    end
+
+    P0 -->|"2. poll (lee desde su offset)"| C1
+    P0 -->|"2. poll"| C2
+    P0 -->|"2. poll"| C3
+    C1 -.->|"3. commit offset"| CO
+    C2 -.->|"3. commit offset"| CO
+    C3 -.->|"3. commit offset"| CO
+```
+
+### Glosario
+
+| Concepto | Qué es | En este proyecto |
+| --- | --- | --- |
+| **Broker** | Servidor Kafka que almacena los mensajes y atiende a productores/consumidores. Varios brokers forman un *cluster*. | 1 broker (`kafka`, `apache/kafka:3.9.0`) |
+| **KRaft** | Modo en que Kafka se coordina a sí mismo (reemplaza a Zookeeper). | `KAFKA_PROCESS_ROLES: broker,controller` |
+| **Topic (tópico)** | Categoría o "canal" con nombre donde se publican los mensajes. | `pagos` |
+| **Partición** | Subdivisión del tópico: un log ordenado e inmutable. El orden solo se garantiza *dentro* de una partición. | 1 partición (`particion: 0`) |
+| **Offset** | Posición (número secuencial) de un mensaje dentro de su partición. Identifica de forma única un mensaje junto con tópico + partición. | `offset: 5` → clave `pagos-0-5` en DynamoDB |
+| **Producer** | Cliente que publica mensajes en un tópico. Recibe de vuelta partición y offset como confirmación (*ack*). | `api` → `GET /topic-test` |
+| **Consumer** | Cliente que lee mensajes de un tópico (modelo *pull*: él pide, Kafka no empuja). | `consumer-*` (Node + `kafkajs`) |
+| **Consumer group** | Conjunto de consumers que comparten un `group.id` y **se reparten** las particiones. Cada grupo lleva su propio offset. | `pagos`, `notificaciones`, `analiticas` |
+| **Commit de offset** | El consumer informa hasta dónde leyó; si se reinicia, continúa desde ahí. | automático en `kafkajs` |
+| **Retención** | Los mensajes no se borran al leerse; viven un tiempo (por defecto 7 días) o hasta cierto tamaño. | por defecto |
+| **Replicación** | Copias de cada partición en otros brokers para tolerar caídas. | factor 1 (broker único, sin alta disponibilidad) |
+| **Rebalanceo** | Reasignación de particiones cuando un consumer entra o sale de un grupo. | `KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0` |
+
+### Los dos patrones de consumo
+
+```mermaid
+flowchart TB
+    subgraph A["Fan-out · grupos DISTINTOS (lo que usamos)"]
+        direction LR
+        TA["Tópico pagos"] --> GA1["grupo pagos"]
+        TA --> GA2["grupo notificaciones"]
+        TA --> GA3["grupo analiticas"]
+    end
+    subgraph B["Balanceo de carga · MISMO grupo"]
+        direction LR
+        TB2["Tópico pagos<br/>(particiones 0,1,2)"] --> GB["grupo pagos"]
+        GB --> R1["réplica 1 ← partición 0"]
+        GB --> R2["réplica 2 ← partición 1"]
+        GB --> R3["réplica 3 ← partición 2"]
+    end
+```
+
+- **Fan-out (grupos distintos):** cada grupo recibe **una copia de todos** los mensajes. Por eso un mensaje publicado genera 3 ítems en DynamoDB (uno por tabla/grupo).
+- **Balanceo (mismo grupo):** los mensajes se **reparten** entre las réplicas del grupo. Una partición la lee como máximo un consumer del grupo, así que con 1 partición una segunda réplica quedaría ociosa.
+
+### Garantías y buenas prácticas
+
+- **Orden:** garantizado solo dentro de una partición. Para que los eventos de una misma entidad (p. ej. un pago) mantengan orden, se publican con la misma **key** (la key determina la partición).
+- **Entrega *at-least-once*:** si un consumer cae antes de confirmar el offset, el mensaje se **reentrega**. Por eso el consumer debe ser **idempotente**: aquí `PutItem` con `attribute_not_exists(PK)` y `PK = <tópico>-<partición>-<offset>` ignora los duplicados.
+- **`fromBeginning: false`:** un grupo nuevo lee solo los mensajes posteriores a su suscripción; con `true` leería todo el historial retenido.
+- **Kafka no es una base de datos de consulta:** sirve para transportar eventos; el estado consultable se persiste aparte (DynamoDB).
+- **Observar:** `kafka-ui` (puerto 8084) muestra tópicos, particiones, offsets y lag por grupo.
+
 ## Mensajería Kafka — diseño (fase 2, pendiente de implementar)
 
 ### Objetivo
@@ -191,9 +273,40 @@ Equivalentes 1:1 en `.ps1` (probados contra el EC2 real):
 ## Checklist fase 3 — persistencia DynamoDB
 
 - [x] 1. Crear las 3 tablas con `./scripts/create-tables.sh` (PK única por mensaje, billing PAY_PER_REQUEST).
-- [ ] 2. Conectar los consumers a DynamoDB con `@aws-sdk/client-dynamodb` (PutItem idempotente con `attribute_not_exists PK`).
-- [ ] 3. Asignar policy DynamoDB al IAM role de la EC2 (automático vía `deploy.sh`).
-- [ ] 4. Redesplegar con los scripts y probar el flujo completo (`topic-test.sh`) → item persistido en DynamoDB.
+- [x] 2. Conectar los consumers a DynamoDB con `@aws-sdk/client-dynamodb` (`PutItemCommand` idempotente con `attribute_not_exists(PK)`).
+- [x] 3. Dar a los containers credenciales AWS para escribir en DynamoDB (ver "Cómo se conectan los containers a DynamoDB" abajo).
+- [x] 4. Redesplegar con los scripts y probar el flujo completo (`scripts/e2e-dynamo.sh`) → item persistido en las 3 tablas (probado: `pagos-0-5`, 1 → 2 ítems por tabla).
+
+### Cómo se conectan los containers a DynamoDB
+
+DynamoDB no es un servicio que viva en la EC2: es un servicio **administrado de AWS** al que se llega por su API HTTPS regional (`dynamodb.us-east-2.amazonaws.com`). Para que un container pueda usarlo hacen falta tres cosas:
+
+1. **Red:** la EC2 tiene salida a internet, así que los containers alcanzan el endpoint regional de DynamoDB. No hay que abrir puertos de entrada ni crear VPC endpoints.
+   > **Ojo: "alcanzable" no es "abierto".** El endpoint se resuelve públicamente, pero DynamoDB **solo acepta requests firmados** con credenciales AWS (SigV4) cuyo usuario/rol tenga permiso IAM sobre la tabla. Sin credenciales válidas responde `UnrecognizedClientException` / `AccessDeniedException`; nadie puede leer ni escribir las tablas solo por conocer la URL.
+2. **Región + nombre de tabla:** `AWS_REGION=us-east-2` (en `docker-compose.yml`) y el nombre de la tabla = `KAFKA_GROUP_ID` (`pagos`/`notificaciones`/`analiticas`, creadas con `create-tables.sh`).
+3. **Credenciales** (lo que no era obvio). El SDK las busca solo, en este orden (*default credential chain*): variables de entorno → perfil compartido → rol de la instancia. Aquí se resuelve por **variables de entorno**:
+
+```mermaid
+flowchart LR
+    L["Tu máquina<br/>aws configure<br/>(Access Key + Secret + Session Token)"] -->|"deploy.sh: aws configure get ..."| S["deploy.sh"]
+    S -->|"ssh ... env AWS_*=..."| E["EC2 (shell remota)"]
+    E -->|"sudo env AWS_*=... docker compose up"| C["docker-compose.yml<br/>environment: AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-} ..."]
+    C --> K["Containers consumer-* y api<br/>variables AWS_* + AWS_REGION"]
+    K -->|"SDK: default credential chain → fromEnv<br/>firma SigV4"| D[("DynamoDB us-east-2")]
+```
+
+- `deploy.sh` toma las credenciales de tu `aws configure` local (o de `AWS_*` ya exportadas) y las pasa por `ssh` → `sudo env` → `docker compose`, que las inyecta en cada container. **Nunca se escriben en un archivo ni en la imagen.**
+- El SDK de Node (`@aws-sdk/client-dynamodb`) y el de Java (`software.amazon.awssdk:dynamodb`) leen `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` y `AWS_SESSION_TOKEN` sin código extra y firman cada request (SigV4).
+- **Alternativa por IAM role (opcional):** `deploy.sh` intenta crear el rol `EC2-DynamoDB-Role` (policy `AmazonDynamoDBFullAccess`) y asociarlo como *instance profile* de la EC2. Si funciona, el SDK obtiene credenciales rotativas del servicio de metadatos de la instancia y las variables `AWS_*` ya no hacen falta. En cuentas restringidas (p. ej. Learner Lab) `iam:CreateRole` suele estar denegado; el paso es *best-effort* y el deploy continúa usando las variables de entorno.
+- **Credenciales temporales:** si las credenciales llevan `AWS_SESSION_TOKEN` (Learner Lab / SSO), **caducan** (horas). Cuando expiran, los consumers loguean `error al guardar en dynamodb: ...ExpiredToken...` y no se guarda nada hasta **volver a ejecutar `deploy.sh`** con credenciales frescas.
+- **Errores típicos y qué significan:**
+
+| Log del consumer | Causa |
+| --- | --- |
+| `ExpiredTokenException` / `UnrecognizedClientException` | credenciales vencidas o vacías → redeploy con credenciales nuevas |
+| `ResourceNotFoundException` | la tabla no existe → `./scripts/create-tables.sh` |
+| `AccessDeniedException` | las credenciales no tienen permisos sobre DynamoDB |
+| `duplicado ignorado (idempotente)` | normal: Kafka reentregó un mensaje ya guardado |
 
 ## Resultado fase 2 — Kafka implementado y probado (10-nov-2026) ✅
 
@@ -252,7 +365,7 @@ api  →  topic "pagos"
 
 ### IAM
 
-- `deploy.sh` / `deploy.ps1` asignan automáticamente la policy `AmazonDynamoDBFullAccess` al IAM role del instance profile de la EC2 (para que los containers con credenciales de la instancia puedan escribir en DynamoDB).
+- `deploy.sh` / `deploy.ps1` **intentan** crear el rol `EC2-DynamoDB-Role` (`AmazonDynamoDBFullAccess`) y asociarlo como instance profile de la EC2. Es *best-effort*: si la cuenta no permite IAM, el deploy sigue y los containers usan las credenciales por variables de entorno (ver "Cómo se conectan los containers a DynamoDB").
 
 ### Scripts
 

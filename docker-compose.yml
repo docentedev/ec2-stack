@@ -19,6 +19,12 @@ services:
     environment:
       # Productor kafka: publica en el topico "pagos" (endpoint /topic-test)
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      # DynamoDB (solo lectura): endpoint GET /mensajes
+      AWS_REGION: us-east-2
+      AWS_DEFAULT_REGION: us-east-2
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
 
   # ---------------------------------------------------- consumers (Node + Express)
   # Cada uno consume el topico "pagos" con su PROPIO grupo (fan-out: reciben todos

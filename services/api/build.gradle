@@ -25,6 +25,9 @@ dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-jackson'
 	// Databind de Jackson 2 (version administrada por el jackson-2-bom del Spring Boot BOM)
 	implementation 'com.fasterxml.jackson.core:jackson-databind'
+	// DynamoDB (AWS SDK v2) para leer los ultimos mensajes persistidos por los consumers
+	implementation platform('software.amazon.awssdk:bom:2.29.52')
+	implementation 'software.amazon.awssdk:dynamodb'
 	testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
