@@ -4,37 +4,61 @@ Sistema basado en microservicios desplegado en **una única instancia EC2 de AWS
 
 ## Arquitectura
 
-| Servicio              | Puerto | Tecnología                     | Estado actual             |
-| --------------------- | ------ | ------------------------------ | ------------------------- |
-| api                   | 8080   | Java 21 + Spring Boot 4 (Gradle) | Solo `GET /health`        |
-| consumer-analiticas   | 8081   | Node.js + Express              | Solo `GET /health`        |
-| consumer-notificaciones | 8082 | Node.js + Express              | Solo `GET /health`        |
-| consumer-pagos        | 8083   | Node.js + Express              | Solo `GET /health`        |
-| kafka                 | 9092   | Kafka                          | Broker de mensajería      |
-| kafka-ui              | 8084   | Kafka UI                       | UI de administración      |
+| Servicio                 | Puerto | Tecnología                        | Estado actual                  |
+| ------------------------ | ------ | --------------------------------- | ------------------------------ |
+| api                      | 8080   | Java 21 + Spring Boot 4 (Gradle)  | Solo `GET /health`             |
+| consumer-analiticas      | 8081   | Node.js 22 + Express              | Solo `GET /health`             |
+| consumer-notificaciones  | 8082   | Node.js 22 + Express              | Solo `GET /health`             |
+| consumer-pagos           | 8083   | Node.js 22 + Express              | Solo `GET /health`             |
+| kafka                    | 9092   | Apache Kafka 3.9 (KRaft)          | Broker de mensajería (interno) |
+| kafka-ui                 | 8084   | Kafka UI                          | UI de administración           |
 
-> **Nota:** el puerto de kafka-ui está propuesto en 8084 (su default es 8080, que choca con `api`).
+> Kafka queda **interno** a la red de Docker (los servicios se conectan como `kafka:9092`). Para debugging desde el propio EC2 existe `127.0.0.1:29092`. Kafka-ui usa **8084** porque su default (8080) choca con `api`.
 
 ## Estructura del repositorio
 
 ```
 proyectoFinal/
 ├── README.md
-├── scripts/                  # Scripts de despliegue y operación
-│   ├── deploy.sh             # (a generar) despliegue completo en EC2
-│   └── cleanup.sh            # (a generar) limpieza del stack anterior sin docker
+├── docker-compose.yml        # stack completo: 4 servicios + kafka + kafka-ui
+├── .gitignore                # ignora *.pem, node_modules, build, .gradle
+├── mi-llave-privada.pem      # llave SSH del EC2 (NUNCA commitear)
+├── scripts/
+│   ├── config.sh             # EDITAR: IP/DNS del EC2, usuario, región, SG
+│   ├── cleanup.sh            # detiene y respalda el stack viejo sin docker
+│   ├── deploy.sh             # despliegue completo (limpia + rsync + build + health)
+│   ├── verify.sh             # health checks contra la IP pública del EC2
+│   └── security-group.sh     # abre puertos en el SG (SSH a tu IP + 8080-8084)
 └── services/
-    ├── api/                  # Spring Boot (Java 21, Gradle)
-    ├── consumer-analiticas/  # Node.js + Express
-    ├── consumer-notificaciones/ # Node.js + Express
-    └── consumer-pagos/       # Node.js + Express
+    ├── api/                  # Spring Boot (Dockerfile multi-stage)
+    ├── consumer-analiticas/  # Node + Express (server.js + Dockerfile)
+    ├── consumer-notificaciones/
+    └── consumer-pagos/
 ```
 
-Pendiente a generar en la raíz:
+## Imágenes Docker (base mínima funcional)
 
-- `docker-compose.yml` (servicios + kafka + kafka-ui)
-- `Dockerfile` por cada servicio
-- `.env` / variables de entorno
+Cada servicio usa la **imagen oficial más pequeña que sigue siendo funcional y mantenida** para su runtime:
+
+| Servicio             | Imagen base (build)               | Imagen base (runtime)         | Imagen final medida |
+| -------------------- | --------------------------------- | ----------------------------- | ------------------- |
+| api                  | `eclipse-temurin:21-jdk-alpine`   | `eclipse-temurin:21-jre-alpine` | 324 MB |
+| consumer-analiticas  | `node:22-alpine` (mismo)          | `node:22-alpine`              | 243 MB |
+| consumer-notificaciones | `node:22-alpine` (mismo)       | `node:22-alpine`              | 243 MB |
+| consumer-pagos       | `node:22-alpine` (mismo)          | `node:22-alpine`              | 243 MB |
+| kafka                | `apache/kafka:3.9.0`              | —                             | 634 MB |
+| kafka-ui             | `provectuslabs/kafka-ui:latest`   | —                             | 411 MB |
+
+Decisiones:
+
+- **api**: multi-stage — el JDK alpine solo existe en la etapa de build (descartada); el runtime lleva solo el JRE alpine. Las variantes `-alpine` de Temurin existen para amd64 y arm64 (cualquier tipo de EC2). `npm cache clean` / capas ordenadas para aprovechar cache de Docker.
+- **consumers**: `node:22-alpine` es la imagen oficial de Node más pequeña con npm funcional; se corre con usuario no-root (`USER node`).
+- Verificado en Mac ARM64 y portable a EC2 amd64 (t2/t3) o arm64 (t4g).
+
+Si se quisiera reducir aún más (no necesario por ahora):
+
+- api: **jlink** (JRE a medida solo con los módulos que usa Spring) → imagen ~120-150 MB, a costa de un Dockerfile frágil (faltantes de módulos aparecen en runtime).
+- consumers: `gcr.io/distroless/nodejs22` → ~150 MB, sin shell (no se puede `docker exec sh` para debuggear).
 
 ## Infraestructura
 
@@ -44,9 +68,17 @@ Pendiente a generar en la raíz:
 
 ## Despliegue
 
-- Se despliega con `scripts/deploy.sh` (a futuro existe la versión Windows `deploy.ps1`).
-- Utiliza **AWS CLI** + `ssh`/`rsync` para conectar y desplegar en el EC2.
-- Kafka y kafka-ui también se levantan como contenedores dentro del mismo compose.
+1. Editar `scripts/config.sh`: `EC2_HOST` (IP o DNS público del EC2) y revisar usuario/llave/región.
+2. Ejecutar en orden:
+   ```bash
+   ./scripts/security-group.sh   # abre 22 (a tu IP) y 8080-8084
+   ./scripts/deploy.sh           # limpia stack viejo + despliega el nuevo
+   ./scripts/verify.sh           # verifica desde afuera, contra la IP pública
+   ```
+- `deploy.sh` usa `rsync` + `docker compose up -d --build` (build en el propio EC2, sin registry).
+- La primera build de la api demora varios minutos (descarga Gradle + dependencias Maven dentro del contenedor).
+- En instancias con poca RAM el deploy crea un swap de 2G para que el build de Gradle no muera por OOM.
+- A futuro: versión Windows del deploy (`deploy.ps1`).
 
 ## Reglas del proyecto
 
@@ -58,21 +90,19 @@ Pendiente a generar en la raíz:
 
 > Marcar cada paso al completarlo.
 
-- [ ] 1. Detectar y detener el proceso Spring Boot que corre hoy sin Docker en el EC2.
-- [ ] 2. Liberar los puertos usados por el stack anterior (8080, etc.).
-- [ ] 3. Eliminar binarios/jars y artefactos del despliegue anterior (opcional: desinstalar Java).
-- [ ] 4. Verificar/instalar Docker y Docker Compose en el EC2.
-- [ ] 5. Generar `Dockerfile` por servicio y `docker-compose.yml`.
-- [ ] 6. Sincronizar el código del proyecto al EC2 (`rsync`).
-- [ ] 7. Levantar el stack completo (`docker compose up -d --build`).
-- [ ] 8. Verificar health de cada servicio (`/health` en 8080–8083) y kafka-ui en 8084.
-- [ ] 9. Ajustar Security Group de la instancia (puertos según decisión).
-- [ ] 10. Documentar resultado del despliegue en este README.
+- [x] 1. Generar `Dockerfile` por servicio y `docker-compose.yml` (stack: api, 3 consumers, kafka KRaft, kafka-ui).
+- [x] 2. Generar scripts en `./scripts` (config, cleanup, deploy, verify, security-group).
+- [x] 3. Verificación local del stack: build de las 4 imágenes + health checks OK (api, consumers, kafka-ui).
+- [ ] 4. Definir `EC2_HOST` en `scripts/config.sh`.
+- [ ] 5. Abrir puertos en el Security Group (`./scripts/security-group.sh`).
+- [ ] 6. Detectar y detener el proceso Spring Boot que corre hoy sin Docker en el EC2 (`cleanup.sh` lo detecta por systemd y por puertos 8080-8083, y respalda los jars a `~/backup-pre-docker/`).
+- [ ] 7. Desplegar el stack completo (`./scripts/deploy.sh`: rsync + build + health checks).
+- [ ] 8. Verificar desde afuera contra la IP pública (`./scripts/verify.sh`).
+- [ ] 9. Documentar resultado del despliegue en este README (URLs finales).
 
-## Decisiones pendientes
+## Notas de verificación local (10-nov-2026)
 
-- ¿Cómo corre hoy el Spring Boot en el EC2 (systemd, nohup, pm2)? → afecta el script de limpieza.
-- ¿Cómo llega el código al EC2 (rsync desde local, git clone, imágenes ECR)?
-- ¿Kafka en modo KRaft (sin Zookeeper) o con Zookeeper?
-- ¿Qué puertos se exponen en el Security Group?
-- ¿Se desinstala Java del EC2 tras dockerizar, o solo se detiene el proceso?
+- Stack levantado en Docker local (Rancher Desktop, ARM64): los 6 contenedores Up, health checks OK para los 5 endpoints (4 `/health` + kafka-ui HTTP 200).
+- El health de la api dentro de la red Docker: `{"status":"OK"}` (consumers: `{"message":"OK"}`).
+- El jar no corre con el `java` del Mac (Java 17 local vs class file 65 de Java 21): **no es problema** — el contenedor lleva su propio JRE 21; de hecho valida por qué conviene dockerizar.
+- En el Mac hay un túnel SSH propio ocupando 8080-8084, por lo que los tests locales se hicieron dentro de la red de Docker (`docker run --network proyecto-final_default curlimages/curl ... http://api:8080/health`). Para probar en el navegador localmente, detener antes ese túnel o usar `docker compose up -d` y acceder por los puertos una vez libres.
