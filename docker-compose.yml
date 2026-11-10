@@ -17,22 +17,28 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # El api aún no consume kafka; queda preparado para cuando se integre
+      # Productor kafka: publica en el topico "pagos" (endpoint /topic-test)
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
 
   # ---------------------------------------------------- consumers (Node + Express)
+  # Cada uno consume el topico "pagos" con su PROPIO grupo (fan-out: reciben todos
+  # una copia de cada mensaje). Ver README: "Mensajeria Kafka - diseno".
   consumer-analiticas:
     build:
       context: ./services/consumer-analiticas
     image: proyecto-final/consumer-analiticas:latest
     container_name: consumer-analiticas
     restart: unless-stopped
+    depends_on:
+      - kafka
     ports:
       - "8081:8081"
     environment:
       SERVICE_NAME: consumer-analiticas
       PORT: 8081
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_GROUP_ID: analiticas
+      KAFKA_TOPIC: pagos
 
   consumer-notificaciones:
     build:
@@ -40,12 +46,16 @@ services:
     image: proyecto-final/consumer-notificaciones:latest
     container_name: consumer-notificaciones
     restart: unless-stopped
+    depends_on:
+      - kafka
     ports:
       - "8082:8082"
     environment:
       SERVICE_NAME: consumer-notificaciones
       PORT: 8082
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_GROUP_ID: notificaciones
+      KAFKA_TOPIC: pagos
 
   consumer-pagos:
     build:
@@ -53,12 +63,16 @@ services:
     image: proyecto-final/consumer-pagos:latest
     container_name: consumer-pagos
     restart: unless-stopped
+    depends_on:
+      - kafka
     ports:
       - "8083:8083"
     environment:
       SERVICE_NAME: consumer-pagos
       PORT: 8083
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_GROUP_ID: pagos
+      KAFKA_TOPIC: pagos
 
   # ---------------------------------------------------- kafka (KRaft, sin Zookeeper)
   kafka:

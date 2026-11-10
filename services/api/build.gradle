@@ -19,6 +19,12 @@ repositories {
 
 dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+	// Kafka productor (Spring Boot 4 trae starter propio; version administrada por el BOM)
+	implementation 'org.springframework.boot:spring-boot-starter-kafka'
+	// Jackson (Spring Boot 4 movio Jackson a modulo propio con starter propio)
+	implementation 'org.springframework.boot:spring-boot-starter-jackson'
+	// Databind de Jackson 2 (version administrada por el jackson-2-bom del Spring Boot BOM)
+	implementation 'com.fasterxml.jackson.core:jackson-databind'
 	testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }

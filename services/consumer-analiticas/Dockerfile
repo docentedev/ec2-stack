@@ -10,7 +10,7 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
-COPY index.js server.js ./
+COPY index.js server.js kafka-consumer.js ./
 
 EXPOSE 8081
 USER node

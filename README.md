@@ -71,6 +71,54 @@ Si se quisiera reducir aún más (no necesario por ahora):
 - Hoy el EC2 tiene corriendo **sin Docker** un proyecto Java + Spring Boot desplegado directamente sobre el sistema operativo.
 - **Objetivo:** partir de cero — limpiar lo que corre hoy y desplegar el stack nuevo 100% dockerizado con `docker-compose`.
 
+## Mensajería Kafka — diseño (fase 2, pendiente de implementar)
+
+### Objetivo
+
+La **api** (productor) publica eventos en Kafka y los **3 consumers** los procesan, cada uno con su **propio consumer group**.
+
+### Tópico
+
+- Nombre: `pagos`
+- Particiones: 1 (broker único)
+- Creación: automática al primer mensaje (el broker ya tiene `KAFKA_AUTO_CREATE_TOPICS_ENABLE=true` en `docker-compose.yml`)
+
+### Productor — api (Spring Boot)
+
+- Dependencia: `spring-kafka` (versión administrada por el BOM de Spring Boot).
+- Conexión: `KAFKA_BOOTSTRAP_SERVERS=kafka:9092` (ya definida en `docker-compose.yml`).
+- Endpoint de prueba: `GET /topic-test?msj=test`
+  - Produce el mensaje al tópico `pagos` y responde confirmación con tópico/partición/offset.
+  - Si `msj` no viene, usa `"test"` por defecto.
+
+### Consumidores — services/consumer-* (Node.js)
+
+- Dependencia: `kafkajs` (cliente Kafka moderno y mantenido para Node; `kafka-node` está deprecado).
+- Cada consumer se suscribe al tópico `pagos` con su propio grupo:
+
+| Servicio                | group.id propuesto | Qué recibe                        |
+| ----------------------- | ------------------ | --------------------------------- |
+| consumer-analiticas     | `analiticas`       | todas las mensajes del tópico     |
+| consumer-notificaciones | `notificaciones`   | todas las mensajes del tópico     |
+| consumer-pagos          | `pagos`            | todas las mensajes del tópico     |
+
+- Semántica de **grupos distintos**: cada grupo mantiene su propio offset → cada consumer recibe una copia de TODAS las mensajes (fan-out / broadcast). Si compartieran grupo, las mensajes se repartirían entre ellos (load balancing).
+- Al recibir un mensaje: loguear en consola (visible con `docker compose logs` y en kafka-ui).
+
+### Decisiones resueltas
+
+1. **Suscripción**: los 3 consumers escuchan el tópico `pagos` (fan-out: cada uno recibe todas las mensajes).
+2. **Formato**: JSON con metadatos — `{"mensaje":"test","origen":"api","fecha":"<ISO-8601>"}`.
+3. **group.id**: nombre del dominio — `analiticas` / `notificaciones` / `pagos`.
+4. **Al recibir**: solo log en consola (visible con `docker compose logs` y en kafka-ui).
+
+### Notas de implementación
+
+- Spring Boot 4 (a diferencia de Boot 3) sí tiene starter: `spring-boot-starter-kafka` (módulo de autoconfiguración `spring-boot-kafka` + `spring-kafka` 4.1.2, administrado por el BOM).
+- Consumidores Node: `kafkajs`, con reconexión automática (kafka puede tardar unos segundos en estar listo tras `compose up`).
+- Variables nuevas en `docker-compose.yml` por consumer: `KAFKA_GROUP_ID` y `KAFKA_TOPIC` (+ `depends_on: kafka`).
+- Script de prueba del flujo completo: `scripts/topic-test.sh` (bash) y `scripts/topic-test.ps1` (Windows) — publica vía `/topic-test` y verifica la recepción en los logs de los 3 consumers.
+
 ## Despliegue
 
 ### macOS / Linux (bash)
@@ -126,6 +174,33 @@ Equivalentes 1:1 en `.ps1` (probados contra el EC2 real):
 - [x] 7. Desplegar el stack completo (`./scripts/deploy.sh`: rsync + build + health checks).
 - [x] 8. Verificar desde afuera contra la IP pública (`./scripts/verify.sh`).
 - [x] 9. Documentar resultado del despliegue en este README (URLs finales).
+
+## Checklist fase 2 — mensajería Kafka
+
+- [ ] 1. Agregar dependencia Kafka a la api (`spring-kafka`) y a los 3 consumers (`kafkajs`).
+- [ ] 2. Implementar endpoint `GET /topic-test?msj=test` (productor) en la api.
+- [ ] 3. Implementar suscripción al tópico `pagos` en los consumers con sus grupos propios.
+- [ ] 4. Verificar build local de las 4 imágenes (Docker).
+- [ ] 5. Redesplegar con los scripts (`deploy.sh` / `deploy.ps1`) y verificar health checks.
+- [x] 6. Probar flujo completo: `/topic-test?msj=test` → confirmar recepción en los 3 consumers (logs) y en kafka-ui.
+
+## Resultado fase 2 — Kafka implementado y probado (10-nov-2026) ✅
+
+### Implementación
+
+- **api**: `spring-boot-starter-kafka` + `spring-boot-starter-jackson` + `jackson-databind` (Jackson 2, version administrada por el jackson-2-bom del Spring Boot BOM); `spring.kafka.bootstrap-servers=${KAFKA_BOOTSTRAP_SERVERS:kafka:9092}`; `TopicTestController` con `GET /topic-test?msj=test` (produce JSON `{"mensaje","origen":"api","fecha"}` en tópico `pagos` y responde con topic/particion/offset; msj default `"test"`).
+- **Build fix necesario**: Spring Boot 4 no auto-configuraba el `ObjectMapper` con los starters agregados → se agregó `JacksonConfig` con bean `ObjectMapper` explícito → `BUILD SUCCESSFUL`.
+- **consumers**: `kafkajs@2.2.4` + `kafka-consumer.js` (conect + subscribe a `pagos` con retry); `server.js` arranca el consumidor.
+- **docker-compose.yml**: cada consumer con `KAFKA_GROUP_ID` + `KAFKA_TOPIC` propios + `depends_on: kafka`.
+
+### Pruebas (local + EC2)
+
+1. Local (Docker): `/topic-test?msj=hola-kafka-xyz` → `{"status":"enviado","topico":"pagos","particion":1,"offset":1}` → los 3 consumers loguearon: `kafka <- topic=pagos grupo=<group> partition=... offset=... mensaje={...}`.
+2. EC2 (via scripts): redeploy con `deploy.sh` → health checks OK (5/5) → `./scripts/topic-test.sh test-fluxo-final` → publicó vía api (`offset=0`) y **los 3 consumers OK** (log via ssh).
+
+### Flujo final
+
+`api --(KafkaTemplate)--> topico "pagos" --> 3 consumers (grupos analiticas/notificaciones/pagos) --> log en consola`.
 
 ## Resultado del despliegue (10-nov-2026) ✅
 
